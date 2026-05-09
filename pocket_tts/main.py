@@ -26,8 +26,61 @@ from pocket_tts.default_parameters import (
     get_default_voice_for_language,
 )
 from pocket_tts.models.tts_model import TTSModel, export_model_state
+from pocket_tts.text_normalization import UserDictionary
 from pocket_tts.utils.logging_utils import enable_logging
 from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
+
+DEFAULT_DICTIONARY_DIR = Path(
+    os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+) / "pocket-tts"
+DEFAULT_DICTIONARY_CANDIDATES = (
+    DEFAULT_DICTIONARY_DIR / "dictionary.yaml",
+    DEFAULT_DICTIONARY_DIR / "dictionary.yml",
+    DEFAULT_DICTIONARY_DIR / "dictionary.json",
+)
+
+
+def _resolve_dictionary(
+    explicit_path: str | None, logger: logging.Logger
+) -> UserDictionary | None:
+    """Load a UserDictionary from --dictionary, otherwise from the default path.
+
+    If ``explicit_path`` is given the file must exist and load successfully or
+    we exit non-zero.  When falling back to the default search path
+    (``$XDG_CONFIG_HOME/pocket-tts/dictionary.{yaml,yml,json}``) a missing file
+    is silently treated as "no dictionary" since most users don't have one.
+    """
+    if explicit_path:
+        path = Path(explicit_path).expanduser()
+        if not path.exists():
+            logger.error("Dictionary file not found: %s", path)
+            raise typer.Exit(code=1)
+        try:
+            return UserDictionary.from_file(path)
+        except Exception as exc:  # ValueError, ImportError, json.JSONDecodeError, ...
+            logger.error("Failed to load dictionary %s: %s", path, exc)
+            raise typer.Exit(code=1) from exc
+
+    for candidate in DEFAULT_DICTIONARY_CANDIDATES:
+        if candidate.exists():
+            try:
+                dictionary = UserDictionary.from_file(candidate)
+            except Exception as exc:
+                logger.warning(
+                    "Found %s but failed to load it (%s); continuing without dictionary.",
+                    candidate,
+                    exc,
+                )
+                return None
+            entry_count = sum(len(items) for items in dictionary.entries.values())
+            logger.info(
+                "Loaded dictionary from %s (%d entries across %d sections)",
+                candidate,
+                entry_count,
+                len(dictionary.entries),
+            )
+            return dictionary
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +331,19 @@ def generate(
     quantize: Annotated[
         bool, typer.Option(help="Apply int8 quantization to reduce memory usage")
     ] = False,
+    dictionary: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Path to a user pronunciation dictionary (.yaml/.yml/.json). "
+                "If omitted, pocket-tts auto-loads "
+                "$XDG_CONFIG_HOME/pocket-tts/dictionary.{yaml,yml,json} "
+                "when present (defaults to ~/.config/pocket-tts/...). "
+                "Pass an empty string to disable dictionary loading."
+            ),
+            show_default=False,
+        ),
+    ] = None,
 ):
     """Generate speech using Kyutai Pocket TTS."""
     log_level = logging.ERROR if quiet else logging.INFO
@@ -305,12 +371,18 @@ def generate(
         if voice is None:
             voice = get_default_voice_for_language(language)
         model_state_for_voice = tts_model.get_state_for_audio_prompt(voice)
+        # An empty string explicitly disables dictionary loading; None falls
+        # back to the default-path lookup inside _resolve_dictionary.
+        user_dictionary = (
+            None if dictionary == "" else _resolve_dictionary(dictionary, logger)
+        )
         # Stream audio generation directly to file or stdout
         audio_chunks = tts_model.generate_audio_stream(
             model_state=model_state_for_voice,
             text_to_generate=text,
             frames_after_eos=frames_after_eos,
             max_tokens=max_tokens,
+            dictionary=user_dictionary,
         )
 
         stream_audio_chunks(output_path, audio_chunks, tts_model.config.mimi.sample_rate)
