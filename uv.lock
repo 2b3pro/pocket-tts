@@ -1177,6 +1177,9 @@ dependencies = [
 audio = [
     { name = "soundfile" },
 ]
+dictionary = [
+    { name = "pyyaml" },
+]
 quantize = [
     { name = "torchao" },
 ]
@@ -1203,6 +1206,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2" },
     { name = "pydantic", specifier = ">=2" },
     { name = "python-multipart", specifier = ">=0.0.21" },
+    { name = "pyyaml", marker = "extra == 'dictionary'", specifier = ">=6.0" },
     { name = "requests", specifier = ">=2.20.0" },
     { name = "safetensors", specifier = ">=0.4.0" },
     { name = "scipy", specifier = ">=1.5.0" },
@@ -1214,7 +1218,7 @@ requires-dist = [
     { name = "typing-extensions", specifier = ">=4.0.0" },
     { name = "uvicorn", specifier = ">=0.13.0" },
 ]
-provides-extras = ["audio", "quantize"]
+provides-extras = ["audio", "quantize", "dictionary"]
 
 [package.metadata.requires-dev]
 dev = [

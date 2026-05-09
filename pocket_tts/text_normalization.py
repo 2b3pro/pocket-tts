@@ -17,9 +17,12 @@ Adding a new pattern is one entry in :data:`NORMALIZERS`.
 
 from __future__ import annotations
 
+import json
 import re
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -126,14 +129,221 @@ NORMALIZERS: tuple[Normalizer, ...] = (
 )
 
 
-def normalize_text(text: str, language: str = "english") -> str:
-    """Apply every registered normalizer to ``text`` in registry order.
+# ---------------------------------------------------------------------------
+# User dictionary
+# ---------------------------------------------------------------------------
+
+# Section name treated as "applies to every language".
+COMMON_SECTION = "common"
+
+
+def _is_word_char(char: str) -> bool:
+    """Return True if ``char`` is a ``\\b``-significant word character."""
+    return char.isalnum() or char == "_"
+
+
+@dataclass(frozen=True)
+class DictionaryEntry:
+    """A single user-defined pronunciation override.
+
+    Attributes:
+        match: The text to find.  When ``regex`` is False (default), this is
+            treated as a literal string anchored on word boundaries.  When
+            ``regex`` is True, it is compiled directly as a Python regex.
+        replace: The replacement text (supports backreferences like ``\\1``
+            when ``regex`` is True).
+        regex: If True, treat ``match`` as a regex; otherwise as a literal
+            with word-boundary anchoring.  Defaults to False.
+        case_insensitive: If True, match is case-insensitive.  Defaults to
+            False.
+    """
+
+    match: str
+    replace: str
+    regex: bool = False
+    case_insensitive: bool = False
+
+    def compile(self) -> re.Pattern[str]:
+        """Compile this entry to a :class:`re.Pattern`.
+
+        For literal matches, ``\\b`` is added on each side only when the
+        adjacent character of ``match`` is a word character (``[A-Za-z0-9_]``).
+        ``\\b`` only fires at a word/non-word transition, so anchoring it
+        next to a non-word character (e.g. the trailing ``.`` in ``"Mr."``)
+        would prevent the pattern from ever matching when followed by
+        another non-word character such as whitespace.
+
+        Raises:
+            re.error: If ``regex`` is True and ``match`` is malformed.
+            ValueError: If ``match`` is empty.
+        """
+        if not self.match:
+            raise ValueError("DictionaryEntry.match must be non-empty")
+        flags = re.IGNORECASE if self.case_insensitive else 0
+        if self.regex:
+            return re.compile(self.match, flags)
+        prefix = r"\b" if _is_word_char(self.match[0]) else ""
+        suffix = r"\b" if _is_word_char(self.match[-1]) else ""
+        return re.compile(prefix + re.escape(self.match) + suffix, flags)
+
+
+@dataclass
+class UserDictionary:
+    """User-supplied pronunciation overrides, organised per language.
+
+    Applied *after* the built-in normalizers (decimals, money, ...) so the
+    user can layer overrides on top of structural rewrites.  For each call
+    to :meth:`apply`, entries under the requested ``language`` section run
+    first, followed by entries under the :data:`COMMON_SECTION` section.
+
+    Construct via :meth:`from_dict`, :meth:`from_file`, or directly with a
+    pre-built ``entries`` mapping.
+
+    Example:
+        >>> d = UserDictionary.from_dict({
+        ...     "english": [
+        ...         {"match": "API", "replace": "ay pee eye"},
+        ...         {"match": "lol", "replace": "laugh out loud",
+        ...          "case_insensitive": True},
+        ...     ],
+        ...     "common": [{"match": "&", "replace": " and "}],
+        ... })
+        >>> d.apply("The API is great, lol & I love it.", "english")
+        'The ay pee eye is great, laugh out loud  and  I love it.'
+    """
+
+    entries: dict[str, list[DictionaryEntry]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Validate regex syntax eagerly so bad entries fail fast at load time
+        # rather than on first use.
+        for section, items in self.entries.items():
+            for entry in items:
+                try:
+                    entry.compile()
+                except re.error as exc:
+                    raise ValueError(
+                        f"Invalid regex in dictionary section {section!r}: "
+                        f"{entry.match!r} ({exc})"
+                    ) from exc
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Iterable[dict[str, Any] | DictionaryEntry]]) -> "UserDictionary":
+        """Build a :class:`UserDictionary` from a nested mapping.
+
+        ``raw`` must map language section names to iterables of either
+        ``DictionaryEntry`` instances or plain ``dict`` rows with the same
+        keys (``match`` required, ``replace`` required, ``regex`` /
+        ``case_insensitive`` optional).
+        """
+        entries: dict[str, list[DictionaryEntry]] = {}
+        for section, items in raw.items():
+            section_entries: list[DictionaryEntry] = []
+            for item in items:
+                if isinstance(item, DictionaryEntry):
+                    section_entries.append(item)
+                    continue
+                if "match" not in item or "replace" not in item:
+                    raise ValueError(
+                        f"Dictionary entry in section {section!r} must have "
+                        f"'match' and 'replace' keys; got {item!r}"
+                    )
+                section_entries.append(
+                    DictionaryEntry(
+                        match=item["match"],
+                        replace=item["replace"],
+                        regex=bool(item.get("regex", False)),
+                        case_insensitive=bool(item.get("case_insensitive", False)),
+                    )
+                )
+            entries[section] = section_entries
+        return cls(entries=entries)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "UserDictionary":
+        """Load a dictionary from a JSON or YAML file (auto-detected by extension).
+
+        ``.json`` files use the stdlib ``json`` module.  ``.yaml`` / ``.yml``
+        files require ``pyyaml`` to be installed; install it via the
+        ``dictionary`` extra: ``pip install pocket-tts[dictionary]``.
+        """
+        path = Path(path)
+        suffix = path.suffix.lower()
+        text = path.read_text(encoding="utf-8")
+        if suffix == ".json":
+            raw = json.loads(text)
+        elif suffix in {".yaml", ".yml"}:
+            try:
+                import yaml  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise ImportError(
+                    "Loading YAML dictionaries requires pyyaml.  Install with "
+                    "`pip install pocket-tts[dictionary]` or use a .json file."
+                ) from exc
+            raw = yaml.safe_load(text)
+        else:
+            raise ValueError(
+                f"Unsupported dictionary file extension: {suffix!r}.  "
+                f"Use .json, .yaml, or .yml."
+            )
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Dictionary file {path} must contain a top-level mapping of "
+                f"language -> entries; got {type(raw).__name__}."
+            )
+        return cls.from_dict(raw)
+
+    def merge(self, other: "UserDictionary") -> "UserDictionary":
+        """Return a new dictionary containing ``self`` then ``other``.
+
+        Within each section, entries from ``other`` run *after* entries from
+        ``self``, so ``other`` can override a substitution produced by
+        ``self`` (later substitutions act on the result of earlier ones).
+        Section order in the result follows insertion: sections only in
+        ``self`` keep their original position; new sections from ``other``
+        are appended.
+        """
+        merged: dict[str, list[DictionaryEntry]] = {
+            section: list(items) for section, items in self.entries.items()
+        }
+        for section, items in other.entries.items():
+            merged.setdefault(section, []).extend(items)
+        return UserDictionary(entries=merged)
+
+    def apply(self, text: str, language: str = "english") -> str:
+        """Run every entry whose section matches ``language`` (plus common).
+
+        Section lookup is case-sensitive: ``"English"`` and ``"english"`` are
+        distinct sections.  An empty dictionary returns ``text`` unchanged.
+        """
+        for section in (language, COMMON_SECTION):
+            for entry in self.entries.get(section, ()):
+                pattern = entry.compile()
+                text = pattern.sub(entry.replace, text)
+        return text
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+
+def normalize_text(
+    text: str,
+    language: str = "english",
+    dictionary: UserDictionary | None = None,
+) -> str:
+    """Apply every registered normalizer (and the optional dictionary) to ``text``.
 
     Args:
         text: Input text to normalise.
         language: Language config stem (e.g. ``"english"``, ``"german"``).
             Controls the spoken form chosen by language-aware normalizers
-            such as :data:`DECIMAL_WORD`.  Defaults to ``"english"``.
+            such as :data:`DECIMAL_WORD`, and selects the section consulted
+            in ``dictionary``.  Defaults to ``"english"``.
+        dictionary: Optional :class:`UserDictionary` of pronunciation
+            overrides to apply *after* the built-in normalizers.  ``None``
+            (default) skips the user-dictionary pass entirely.
 
     Returns:
         Text with all matched patterns rewritten to spoken form.
@@ -141,4 +351,6 @@ def normalize_text(text: str, language: str = "english") -> str:
     for normalizer in NORMALIZERS:
         handler = normalizer.handler
         text = normalizer.pattern.sub(lambda m, _h=handler: _h(m, language), text)
+    if dictionary is not None:
+        text = dictionary.apply(text, language=language)
     return text

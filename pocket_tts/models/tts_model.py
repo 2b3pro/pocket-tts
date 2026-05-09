@@ -20,7 +20,7 @@ from typing_extensions import Self
 from pocket_tts.conditioners.base import TokenizedText
 from pocket_tts.data.audio import audio_read
 from pocket_tts.data.audio_utils import convert_audio
-from pocket_tts.text_normalization import normalize_text
+from pocket_tts.text_normalization import UserDictionary, normalize_text
 from pocket_tts.default_parameters import (
     DEFAULT_EOS_THRESHOLD,
     DEFAULT_LANGUAGE,
@@ -482,6 +482,7 @@ class TTSModel(nn.Module):
         max_tokens: int = MAX_TOKEN_PER_CHUNK,
         frames_after_eos: int | None = None,
         copy_state: bool = True,
+        dictionary: UserDictionary | None = None,
     ) -> torch.Tensor:
         """Generate complete audio tensor from text input.
 
@@ -538,6 +539,7 @@ class TTSModel(nn.Module):
             frames_after_eos=frames_after_eos,
             copy_state=copy_state,
             max_tokens=max_tokens,
+            dictionary=dictionary,
         ):
             audio_chunks.append(chunk)
         return torch.cat(audio_chunks, dim=0)
@@ -550,6 +552,7 @@ class TTSModel(nn.Module):
         max_tokens: int = MAX_TOKEN_PER_CHUNK,
         frames_after_eos: int | None = None,
         copy_state: bool = True,
+        dictionary: UserDictionary | None = None,
     ):
         """Generate audio streaming chunks from text input.
 
@@ -615,6 +618,7 @@ class TTSModel(nn.Module):
             self.pad_with_spaces_for_short_inputs,
             remove_semicolons=self.remove_semicolons,
             language=self.origin.stem if self.origin is not None else "english",
+            dictionary=dictionary,
         )
 
         for chunk in chunks:
@@ -984,11 +988,14 @@ def split_into_best_sentences(
     pad_with_spaces_for_short_inputs: bool,
     remove_semicolons: bool,
     language: str = "english",
+    dictionary: UserDictionary | None = None,
 ) -> list[str]:
     text_to_generate, _ = prepare_text_prompt(
         text_to_generate, pad_with_spaces_for_short_inputs, remove_semicolons
     )
-    text_to_generate = normalize_text(text_to_generate, language=language)
+    text_to_generate = normalize_text(
+        text_to_generate, language=language, dictionary=dictionary
+    )
     text_to_generate = text_to_generate.strip()
     tokens = tokenizer(text_to_generate)
     list_of_tokens = tokens.tokens[0].tolist()

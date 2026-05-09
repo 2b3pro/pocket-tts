@@ -7,6 +7,10 @@ from pocket_tts.models.tts_model import (  # noqa: E402
     TTSModel,
     export_model_state,
 )
+from pocket_tts.text_normalization import (  # noqa: E402
+    DictionaryEntry,
+    UserDictionary,
+)
 
 # Public methods:
 # TTSModel.device
@@ -16,4 +20,9 @@ from pocket_tts.models.tts_model import (  # noqa: E402
 # TTSModel.generate_audio_stream
 # TTSModel.get_state_for_audio_prompt
 
-__all__ = ["TTSModel", "export_model_state"]
+__all__ = [
+    "DictionaryEntry",
+    "TTSModel",
+    "UserDictionary",
+    "export_model_state",
+]
