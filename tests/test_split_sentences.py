@@ -3,11 +3,28 @@
 import pytest
 
 from pocket_tts.conditioners.text import get_default_tokenizer
-from pocket_tts.models.tts_model import (
-    _DECIMAL_WORD,
-    _normalize_decimals,
-    split_into_best_sentences,
+from pocket_tts.models.tts_model import split_into_best_sentences
+from pocket_tts.text_normalization import (
+    CURRENCY_WORDS,
+    DECIMAL_WORD,
+    NORMALIZERS,
+    normalize_text,
 )
+
+
+def _normalize_decimals(text: str, language: str = "english") -> str:
+    """Test helper: apply only the decimal normalizer."""
+    decimal = next(n for n in NORMALIZERS if n.name == "decimal")
+    return decimal.pattern.sub(lambda m: decimal.handler(m, language), text)
+
+
+def _normalize_money(text: str, language: str = "english") -> str:
+    """Test helper: apply only the money normalizer."""
+    money = next(n for n in NORMALIZERS if n.name == "money")
+    return money.pattern.sub(lambda m: money.handler(m, language), text)
+
+
+_DECIMAL_WORD = DECIMAL_WORD
 
 
 @pytest.fixture(scope="session")
@@ -225,6 +242,108 @@ def test_multiple_decimals_preserved(tokenizer):
     assert len(chunks) == 1
     rejoined = chunks[0].lower()
     assert "3 point 14" in rejoined or "point" in rejoined
+
+
+class TestNormalizeMoney:
+    """Unit tests for the money normalizer."""
+
+    def test_dollars_and_cents(self):
+        assert _normalize_money("$3.02") == "3 dollars and 2 cents"
+
+    def test_singular_dollar_zero_cents(self):
+        assert _normalize_money("$1.00") == "1 dollar"
+
+    def test_singular_dollar_singular_cent(self):
+        assert _normalize_money("$1.01") == "1 dollar and 1 cent"
+
+    def test_cents_only(self):
+        assert _normalize_money("$0.50") == "50 cents"
+
+    def test_one_cent(self):
+        assert _normalize_money("$0.01") == "1 cent"
+
+    def test_dot_cents_form(self):
+        assert _normalize_money("$.50") == "50 cents"
+
+    def test_dollars_only_no_decimal(self):
+        assert _normalize_money("$5") == "5 dollars"
+        assert _normalize_money("$1") == "1 dollar"
+
+    def test_zero_dollars(self):
+        assert _normalize_money("$0") == "0 dollars"
+        assert _normalize_money("$0.00") == "0 dollars"
+
+    def test_thousands_separator(self):
+        assert _normalize_money("$1,234.56") == "1234 dollars and 56 cents"
+        assert _normalize_money("$1,000") == "1000 dollars"
+
+    def test_inline_in_sentence(self):
+        assert _normalize_money("It costs $3.02 today.") == (
+            "It costs 3 dollars and 2 cents today."
+        )
+
+    def test_multiple_amounts(self):
+        assert _normalize_money("Bought it for $5 and sold for $7.50.") == (
+            "Bought it for 5 dollars and sold for 7 dollars and 50 cents."
+        )
+
+    def test_euro(self):
+        assert _normalize_money("€3.02") == "3 euros and 2 cents"
+
+    def test_pound_singular_uses_penny(self):
+        assert _normalize_money("£0.01") == "1 penny"
+
+    def test_pound_plural_uses_pence(self):
+        assert _normalize_money("£3.02") == "3 pounds and 2 pence"
+
+    def test_currency_words_dictionary_complete(self):
+        """Every currency symbol in the regex must have a CURRENCY_WORDS entry."""
+        # Each entry is (singular, plural, frac_singular, frac_plural).
+        for symbol, words in CURRENCY_WORDS.items():
+            assert len(words) == 4, f"{symbol} entry must be 4-tuple"
+            assert all(isinstance(w, str) and w for w in words)
+
+
+class TestNormalizeText:
+    """Tests for the registry orchestrator."""
+
+    def test_money_runs_before_decimals(self):
+        """``$3.02`` must be rewritten as currency, not as ``$3 point 02``."""
+        assert normalize_text("$3.02") == "3 dollars and 2 cents"
+
+    def test_plain_decimal_still_works(self):
+        assert normalize_text("Pi is 3.14") == "Pi is 3 point 14"
+
+    def test_decimal_language_aware(self):
+        assert normalize_text("Es ist 37.0°C", language="german") == (
+            "Es ist 37 Komma 0°C"
+        )
+
+    def test_money_and_decimal_in_same_text(self):
+        text = "It cost $3.02 and the temperature was 98.6°F."
+        assert normalize_text(text) == (
+            "It cost 3 dollars and 2 cents and the temperature was 98 point 6°F."
+        )
+
+    def test_no_match_returns_unchanged(self):
+        assert normalize_text("Hello world.") == "Hello world."
+
+
+def test_money_not_split_into_separate_chunks(tokenizer):
+    """``$3.02`` must not be split on its decimal point either."""
+    text = "It costs $3.02 today, which is reasonable."
+    chunks = split_into_best_sentences(
+        tokenizer,
+        text,
+        max_tokens=50,
+        pad_with_spaces_for_short_inputs=False,
+        remove_semicolons=False,
+    )
+    assert len(chunks) == 1
+    rejoined = chunks[0].lower()
+    assert "dollars" in rejoined and "cents" in rejoined
+    # Must not have leaked through as a raw decimal rewrite.
+    assert "$3 point 02" not in rejoined
 
 
 def test_empty_string_raises(tokenizer):
