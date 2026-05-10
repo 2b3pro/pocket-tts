@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from typing_extensions import Annotated
 
-from pocket_tts.data.audio import stream_audio_chunks
+from pocket_tts.data.audio import stream_audio_chunks, stream_raw_pcm_chunks
 from pocket_tts.default_parameters import (
     DEFAULT_EOS_THRESHOLD,
     DEFAULT_FRAMES_AFTER_EOS,
@@ -171,11 +171,69 @@ def generate_data_with_state(text_to_generate: str, model_state: dict):
     thread.join()
 
 
+def write_raw_pcm_to_queue(
+    queue, text_to_generate, model_state, target_sample_rate: int | None
+):
+    """Counterpart to ``write_to_queue`` that emits raw int16-LE PCM bytes.
+
+    Bypasses the WAV envelope (no 44-byte header, no end-of-stream silence
+    padding). If ``target_sample_rate`` is provided, each chunk is resampled
+    in-line from the model's native 24 kHz before being written.
+    """
+
+    class FileLikeToQueue(io.IOBase):
+        def __init__(self, queue):
+            self.queue = queue
+
+        def write(self, data):
+            self.queue.put(data)
+
+        def flush(self):
+            pass
+
+        def close(self):
+            self.queue.put(None)
+
+    audio_chunks = tts_model.generate_audio_stream(
+        model_state=model_state, text_to_generate=text_to_generate
+    )
+    stream_raw_pcm_chunks(
+        FileLikeToQueue(queue),
+        audio_chunks,
+        source_sample_rate=tts_model.config.mimi.sample_rate,
+        target_sample_rate=target_sample_rate,
+    )
+
+
+def generate_raw_pcm_with_state(
+    text_to_generate: str, model_state: dict, target_sample_rate: int | None = None
+):
+    queue = Queue()
+
+    thread = threading.Thread(
+        target=write_raw_pcm_to_queue,
+        args=(queue, text_to_generate, model_state, target_sample_rate),
+    )
+    thread.start()
+
+    while True:
+        data = queue.get()
+        if data is None:
+            break
+        yield data
+
+    thread.join()
+
+
+_SUPPORTED_OUTPUT_FORMATS = ("wav", "pcm", "pcm_8000")
+
+
 @web_app.post("/tts")
 def text_to_speech(
     text: str = Form(...),
     voice_url: str | None = Form(None),
     voice_wav: UploadFile | None = File(None),
+    output_format: str = Form("wav"),
 ):
     """
     Generate speech from text using the pre-loaded voice prompt or a custom voice.
@@ -184,9 +242,21 @@ def text_to_speech(
         text: Text to convert to speech
         voice_url: Optional built-in voice name (e.g., "alba"), or voice URL (http://, https://, or hf://)
         voice_wav: Optional uploaded voice file (mutually exclusive with voice_url)
+        output_format: Audio container — "wav" (default, with RIFF header),
+            "pcm" (raw int16-LE at the model's native sample rate, no header),
+            or "pcm_8000" (raw int16-LE downsampled to 8 kHz, telephony-ready).
     """
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    if output_format not in _SUPPORTED_OUTPUT_FORMATS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported output_format: {output_format!r} "
+                f"(supported: {', '.join(_SUPPORTED_OUTPUT_FORMATS)})"
+            ),
+        )
 
     if voice_url is None and voice_wav is None:
         voice_url = get_default_voice_for_language(str(tts_model.origin))
@@ -223,6 +293,20 @@ def text_to_speech(
             os.unlink(temp_file_path)
     else:
         raise HTTPException(status_code=500, detail="This should never happen.")
+
+    if output_format in ("pcm", "pcm_8000"):
+        target_rate = 8000 if output_format == "pcm_8000" else None
+        emitted_rate = target_rate if target_rate is not None else tts_model.config.mimi.sample_rate
+        return StreamingResponse(
+            generate_raw_pcm_with_state(text, model_state, target_sample_rate=target_rate),
+            media_type="audio/pcm",
+            headers={
+                "X-Sample-Rate": str(emitted_rate),
+                "X-Channels": "1",
+                "X-Sample-Format": "s16le",
+                "Transfer-Encoding": "chunked",
+            },
+        )
 
     return StreamingResponse(
         generate_data_with_state(text, model_state),
