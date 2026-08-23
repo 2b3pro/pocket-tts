@@ -30,9 +30,9 @@ from pocket_tts.text_normalization import UserDictionary
 from pocket_tts.utils.logging_utils import enable_logging
 from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
 
-DEFAULT_DICTIONARY_DIR = Path(
-    os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
-) / "pocket-tts"
+DEFAULT_DICTIONARY_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "pocket-tts"
+)
 DEFAULT_DICTIONARY_CANDIDATES = (
     DEFAULT_DICTIONARY_DIR / "dictionary.yaml",
     DEFAULT_DICTIONARY_DIR / "dictionary.yml",
@@ -40,9 +40,7 @@ DEFAULT_DICTIONARY_CANDIDATES = (
 )
 
 
-def _resolve_dictionary(
-    explicit_path: str | None, logger: logging.Logger
-) -> UserDictionary | None:
+def _resolve_dictionary(explicit_path: str | None, logger: logging.Logger) -> UserDictionary | None:
     """Load a UserDictionary from --dictionary, otherwise from the default path.
 
     If ``explicit_path`` is given the file must exist and load successfully or
@@ -81,6 +79,7 @@ def _resolve_dictionary(
             )
             return dictionary
     return None
+
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +129,9 @@ async def health():
     return {"status": "healthy"}
 
 
-def write_to_queue(queue, text_to_generate, model_state):
+def write_to_queue(
+    queue, text_to_generate, model_state, frames_after_eos=None
+):  # PAI-PATCH-FRAMES-AFTER-EOS v1
     """Allows writing to the StreamingResponse as if it were a file."""
 
     class FileLikeToQueue(io.IOBase):
@@ -146,17 +147,25 @@ def write_to_queue(queue, text_to_generate, model_state):
         def close(self):
             self.queue.put(None)
 
-    audio_chunks = tts_model.generate_audio_stream(
-        model_state=model_state, text_to_generate=text_to_generate
-    )
+    _gen_kwargs = {
+        "model_state": model_state,
+        "text_to_generate": text_to_generate,
+    }  # PAI-PATCH-FRAMES-AFTER-EOS v1
+    if frames_after_eos is not None:
+        _gen_kwargs["frames_after_eos"] = frames_after_eos
+    audio_chunks = tts_model.generate_audio_stream(**_gen_kwargs)
     stream_audio_chunks(FileLikeToQueue(queue), audio_chunks, tts_model.config.mimi.sample_rate)
 
 
-def generate_data_with_state(text_to_generate: str, model_state: dict):
+def generate_data_with_state(
+    text_to_generate: str, model_state: dict, frames_after_eos: int | None = None
+):  # PAI-PATCH-FRAMES-AFTER-EOS v1
     queue = Queue()
 
     # Run your function in a thread
-    thread = threading.Thread(target=write_to_queue, args=(queue, text_to_generate, model_state))
+    thread = threading.Thread(
+        target=write_to_queue, args=(queue, text_to_generate, model_state, frames_after_eos)
+    )
     thread.start()
 
     # Yield data as it becomes available
@@ -171,9 +180,7 @@ def generate_data_with_state(text_to_generate: str, model_state: dict):
     thread.join()
 
 
-def write_raw_pcm_to_queue(
-    queue, text_to_generate, model_state, target_sample_rate: int | None
-):
+def write_raw_pcm_to_queue(queue, text_to_generate, model_state, target_sample_rate: int | None):
     """Counterpart to ``write_to_queue`` that emits raw int16-LE PCM bytes.
 
     Bypasses the WAV envelope (no 44-byte header, no end-of-stream silence
@@ -234,6 +241,7 @@ def text_to_speech(
     voice_url: str | None = Form(None),
     voice_wav: UploadFile | None = File(None),
     output_format: str = Form("wav"),
+    frames_after_eos: int | None = Form(None),  # PAI-PATCH-FRAMES-AFTER-EOS v1
 ):
     """
     Generate speech from text using the pre-loaded voice prompt or a custom voice.
@@ -309,7 +317,7 @@ def text_to_speech(
         )
 
     return StreamingResponse(
-        generate_data_with_state(text, model_state),
+        generate_data_with_state(text, model_state, frames_after_eos),
         media_type="audio/wav",
         headers={
             "Content-Disposition": "attachment; filename=generated_speech.wav",
@@ -457,9 +465,7 @@ def generate(
         model_state_for_voice = tts_model.get_state_for_audio_prompt(voice)
         # An empty string explicitly disables dictionary loading; None falls
         # back to the default-path lookup inside _resolve_dictionary.
-        user_dictionary = (
-            None if dictionary == "" else _resolve_dictionary(dictionary, logger)
-        )
+        user_dictionary = None if dictionary == "" else _resolve_dictionary(dictionary, logger)
         # Stream audio generation directly to file or stdout
         audio_chunks = tts_model.generate_audio_stream(
             model_state=model_state_for_voice,
