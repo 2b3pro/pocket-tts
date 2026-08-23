@@ -25,14 +25,14 @@ This will generate a WAV file `./tts_output.wav` with the default text and voice
 
 - `--config CONFIG_PATH`: Path to custom config.yaml (for loading local model files). Incompatible with `--language`.
 - `--lsd-decode-steps LSD_DECODE_STEPS`: Number of generation steps (default: 1)
-- `--temperature TEMPERATURE`: Temperature for generation (default: 0.7)
+- `--temperature TEMPERATURE`: Temperature for generation (default: the model's recommended value from its config — 0.3 for the English model, 0.7 otherwise)
 - `--noise-clamp NOISE_CLAMP`: Noise clamp value (default: None)
 - `--eos-threshold EOS_THRESHOLD`: EOS threshold (default: -4.0)
 - `--frames-after-eos FRAMES_AFTER_EOS`: Number of frames to generate after EOS (default: None, auto-calculated based on the text length). Each frame is 80ms.
 
 ### Performance Options
 
-- `--device DEVICE`: Device to use (default: "cpu", you may not get a speedup by using a gpu since it's a small model)
+- `--device DEVICE`: Device to use (default: "cpu"). Whether GPU helps is hardware-dependent — see the main [README's "Running on GPU" section](../../README.md#running-on-gpu) for measured numbers (no speedup observed on some CPUs with strong single-thread performance like Apple Silicon, but a measured ~2.6x speedup on a cloud x86 VM with a Tesla T4).
 - `--quantize`: Use int8 quantization for the model (default: False). This can reduce memory usage and increase speed, with minimal impact on audio quality.
 - `--quiet`, `-q`: Disable logging output
 

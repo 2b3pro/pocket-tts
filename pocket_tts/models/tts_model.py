@@ -8,6 +8,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import safetensors
 import safetensors.torch
@@ -26,12 +27,11 @@ from pocket_tts.default_parameters import (
     DEFAULT_LANGUAGE,
     DEFAULT_LSD_DECODE_STEPS,
     DEFAULT_NOISE_CLAMP,
-    DEFAULT_TEMPERATURE,
     MAX_TOKEN_PER_CHUNK,
 )
 from pocket_tts.models.flow_lm import FlowLMModel
 from pocket_tts.models.mimi import MimiModel
-from pocket_tts.modules import mimi_transformer
+from pocket_tts.modules import transformer
 from pocket_tts.modules.dummy_quantizer import DummyQuantizer
 from pocket_tts.modules.seanet import SEANetDecoder, SEANetEncoder
 from pocket_tts.modules.stateful_module import StatefulModule, increment_steps, init_states
@@ -168,8 +168,8 @@ class TTSModel(nn.Module):
         encoder = SEANetEncoder(**mimi_config["seanet"])
         decoder = SEANetDecoder(**mimi_config["seanet"])
 
-        encoder_transformer = mimi_transformer.ProjectedTransformer(**mimi_config["transformer"])
-        decoder_transformer = mimi_transformer.ProjectedTransformer(**mimi_config["transformer"])
+        encoder_transformer = transformer.ProjectedTransformer(**mimi_config["transformer"])
+        decoder_transformer = transformer.ProjectedTransformer(**mimi_config["transformer"])
         quantizer = DummyQuantizer(**mimi_config["quantizer"])
 
         tts_model.mimi = MimiModel(
@@ -235,7 +235,7 @@ class TTSModel(nn.Module):
         cls,
         language: str | None = None,
         config: str | Path | None = None,
-        temp: float | int = DEFAULT_TEMPERATURE,
+        temp: float | int | None = None,
         lsd_decode_steps: int = DEFAULT_LSD_DECODE_STEPS,
         noise_clamp: float | int | None = DEFAULT_NOISE_CLAMP,
         eos_threshold: float = DEFAULT_EOS_THRESHOLD,
@@ -254,7 +254,9 @@ class TTSModel(nn.Module):
                 If neither `config` nor `language` is provided, defaults to `"english", which is the same model as 'english_2026-04'`.
             config: A path to a custom YAML config file saved locally (e.g., `"C://pocket_tts/pocket_tts_config.yaml"`).
             temp: Sampling temperature for generation. Higher values produce more
-                diverse but potentially lower quality output.
+                diverse but potentially lower quality output. If None, defaults to
+                the model's recommended value from its config file
+                (``default_temperature``, e.g. 0.3 for the English model).
             lsd_decode_steps: Number of steps for Lagrangian Self Distillation
                 decoding. More steps can improve quality but increase computation.
             noise_clamp: Maximum value for noise sampling. If None, no clamping
@@ -304,6 +306,8 @@ class TTSModel(nn.Module):
             raise ValueError("Config should be a path to a YAML file ending with .yaml")
         config_path = Path(config)
         config = load_config(config_path)
+        if temp is None:
+            temp = config.default_temperature
         logger.info(f"Loading model from config at {config_path}...")
 
         tts_model = TTSModel._from_pydantic_config_with_weights(
@@ -369,11 +373,7 @@ class TTSModel(nn.Module):
 
     def _decode_and_dump(self, encoded: torch.Tensor, filename: str):
         mimi_state = init_states(self.mimi, batch_size=1, sequence_length=10000)
-        if encoded.shape[1] == self.mimi.quantizer.dimension:
-            latent_to_decode = self.mimi.quantizer(encoded)
-        else:
-            latent_to_decode = encoded
-        resored_audio = self.mimi.decode_from_latent(latent_to_decode, mimi_state)
+        resored_audio = self.mimi.decode_from_latent(encoded, mimi_state)
         scipy.io.wavfile.write(filename, self.sample_rate, resored_audio.numpy())
         logger.info("Saved restored audio from Mimi encoding to %s for debugging", filename)
 
@@ -384,7 +384,7 @@ class TTSModel(nn.Module):
             # sanity check
             self._decode_and_dump(encoded, "debug_encoded_latent_decoded.wav")
 
-        latents = encoded.transpose(-1, -2).to(torch.float32)
+        latents = encoded.to(torch.float32)
         conditioning = F.linear(latents, self.flow_lm.speaker_proj_weight)
         return conditioning
 
@@ -448,11 +448,9 @@ class TTSModel(nn.Module):
                 if latent is None:
                     break
                 mimi_decoding_input = latent * self.flow_lm.emb_std + self.flow_lm.emb_mean
-                transposed = mimi_decoding_input.transpose(-1, -2)
-                quantized = self.mimi.quantizer(transposed)
 
                 t = time.monotonic()
-                audio_frame = self.mimi.decode_from_latent(quantized, mimi_state)
+                audio_frame = self.mimi.decode_from_latent(mimi_decoding_input, mimi_state)
                 increment_steps(self.mimi, mimi_state, increment=mimi_steps_per_latent)
                 audio_frame_duration = audio_frame.shape[2] / self.config.mimi.sample_rate
                 # We could log the timings here.
@@ -631,7 +629,7 @@ class TTSModel(nn.Module):
             )
             yield from self._generate_audio_stream_short_text(
                 model_state=model_state,
-                text_to_generate=chunk,
+                text_to_generate=text_to_generate,
                 frames_after_eos=effective_frames,
                 copy_state=copy_state,
             )
@@ -737,12 +735,13 @@ class TTSModel(nn.Module):
                 )
             except Exception as e:
                 logger.error(f"Error in autoregressive generation: {e}")
+                # Report the generation error before stopping the decoder. Otherwise
+                # the decoder can publish "done" first and hide the exception.
+                if result_queue is not None:
+                    result_queue.put(("error", e))
                 # Signal decoder to stop by putting None (completion sentinel)
                 if latents_queue is not None:
                     latents_queue.put(None)
-                # Report error to main thread
-                if result_queue is not None:
-                    result_queue.put(("error", e))
 
         generation_thread = threading.Thread(target=run_generation, daemon=True)
         generation_thread.start()
@@ -848,8 +847,8 @@ class TTSModel(nn.Module):
             - Processing time is logged for performance monitoring
             - The state preserves speaker characteristics for voice cloning
         """
-        if isinstance(audio_conditioning, (str, Path)) and str(audio_conditioning).endswith(
-            ".safetensors"
+        if isinstance(audio_conditioning, (str, Path)) and _is_safetensors_source(
+            audio_conditioning
         ):
             if isinstance(audio_conditioning, str):
                 audio_conditioning = download_if_necessary(audio_conditioning)
@@ -993,9 +992,7 @@ def split_into_best_sentences(
     text_to_generate, _ = prepare_text_prompt(
         text_to_generate, pad_with_spaces_for_short_inputs, remove_semicolons
     )
-    text_to_generate = normalize_text(
-        text_to_generate, language=language, dictionary=dictionary
-    )
+    text_to_generate = normalize_text(text_to_generate, language=language, dictionary=dictionary)
     text_to_generate = text_to_generate.strip()
     tokens = tokenizer(text_to_generate)
     list_of_tokens = tokens.tokens[0].tolist()
@@ -1061,6 +1058,15 @@ def export_model_state(model_state: dict[str, dict[str, torch.Tensor]], dest: st
         for key, tensor_value in module_state.items():
             dict_to_store[f"{module_name}/{key}"] = tensor_value
     safetensors.torch.save_file(dict_to_store, dest)
+
+
+def _is_safetensors_source(source: str | Path) -> bool:
+    source_text = str(source)
+    if source_text.startswith(("http://", "https://")):
+        source_text = urlsplit(source_text).path
+    elif source_text.startswith("hf://"):
+        source_text = source_text.rsplit("@", 1)[0]
+    return source_text.endswith(".safetensors")
 
 
 def _import_model_state(

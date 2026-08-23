@@ -157,15 +157,58 @@ audio = model.generate_audio(model_state_copy, "Hello world!")
 
 You can check out the [Python API documentation](https://kyutai-labs.github.io/pocket-tts/API%20Reference/python-api/) for more details and examples.
 
+## Running on GPU
+
+Pocket TTS is designed to run on CPU, and on hardware with strong single-thread CPU performance
+(e.g. Apple Silicon) we did not observe a GPU speedup, notably because we use a batch size of 1
+and a very small model. However, this turns out to be hardware-dependent: measured on a cloud x86
+VM (4 vCPUs) with a Tesla T4, moving the model to GPU gave a consistent ~2.6x speedup over CPU
+(RTF ~2.3-2.5x on CPU vs. ~6.28x on GPU, for both short and long input text). If your CPU is
+thread-limited or otherwise weaker than a modern laptop chip, it's worth trying the GPU.
+
+This is not officially supported (there is no `device` argument on `TTSModel.load_model()`), but
+since `TTSModel` is a regular `nn.Module` you can move it yourself:
+
+```python
+tts_model = TTSModel.load_model()
+tts_model.to("cuda")
+...
+audio = tts_model.generate_audio(voice_state, "Hello world, this is a test.")
+# generate_audio() returns a tensor on the same device as the model, so on GPU you need
+# to move it back to CPU before calling .numpy():
+scipy.io.wavfile.write("output.wav", tts_model.sample_rate, audio.detach().cpu().numpy())
+```
+
+A few things to be aware of if you want to use the GPU:
+- The `generate` CLI command has a `--device` option (defaults to `cpu`, documented in the
+  [CLI reference](docs/CLI%20Commands/generate.md) — note that page's own description ("you may not
+  get a speedup by using a gpu since it's a small model") is what this section is correcting, based
+  on the T4 measurements above); the `serve` command and the Docker image do not expose any device
+  option and will always run on CPU.
+- `pip install pocket-tts` / `uv add pocket-tts` install whatever `torch` build is current on
+  PyPI, which may require a newer CUDA version than your driver supports. In that case
+  `torch.cuda.is_available()` silently returns `False` (you'll only see a `UserWarning` about an
+  outdated driver, not an error). If this happens, install a `torch` build matching your driver's
+  CUDA version explicitly, e.g. `pip install torch --index-url https://download.pytorch.org/whl/cu121`.
+- `quantize=True` (int8 dynamic quantization) only works on CPU; calling it on a model moved to
+  CUDA raises `NotImplementedError: Could not run 'quantized::linear_dynamic' ... 'CUDA' backend`.
+  Separately, the optional `torchao` backend (`pip install pocket-tts[quantize]`) declares
+  `torch>=2.11` — fine with a fresh install (torch 2.11+ is on PyPI as of this writing), but if
+  you've pinned an older `torch` (e.g. to match an older GPU driver's CUDA build, per the point
+  above), adding this extra can pull in a `torchao` that's incompatible with your pinned `torch`
+  and break `quantize=True` even on CPU. Match `torchao`'s `torch` requirement to whatever `torch`
+  you actually have installed.
+
 ## Unsupported features
 
 At the moment, we do not support (but would love pull requests adding):
 
 - [Adding silence in the text input to generate pauses.](https://github.com/kyutai-labs/pocket-tts/issues/6)
-- [Quantization to run the computation in int8.](https://github.com/kyutai-labs/pocket-tts/issues/7)
 
-We tried running this TTS model on the GPU but did not observe a speedup compared to CPU execution,
-notably because we use a batch size of 1 and a very small model.
+We tried running this TTS model on the GPU but did not observe a speedup compared to CPU execution
+on hardware with very strong single-thread CPU performance, notably because we use a batch size of
+1 and a very small model. See the ["Running on GPU"](#running-on-gpu) section above for measurements
+on other hardware and caveats if you want to try it yourself.
 
 ## Development and local setup
 
@@ -196,7 +239,8 @@ We don't have official support for this yet, but you can try out one of these co
 - [pocket-reader](https://github.com/lukasmwerner/pocket-reader) by @lukasmwerner- Browser screen reader
 - [pocket-tts-wyoming](https://github.com/ikidd/pocket-tts-wyoming) by @ikidd - Docker container for pocket-tts using Wyoming protocol, ready for Home Assistant Voice use.
 - [Sonorus](https://www.nexusmods.com/hogwartslegacy/mods/2409) by @KevinAHM - Talk to any named character in Hogwarts Legacy with their original voice.
-- [Mac pocket-tts](https://github.com/slaughters85j/pocket-tts) by @slaughters85j - Mac Desktop App + macOS Quick Action
+- [Native macOS App](https://github.com/slaughters85j/pocket-tts-macos) by @slaughters85j - Native macOS app, Python-free. Runs Pocket-TTS via Core ML, fully on-device. Includes signed and notarized .app releases.
+- [Electron macOS App](https://github.com/slaughters85j/pocket-tts) by @slaughters85j - Electron Mac Desktop App + macOS Quick Action
 - [pocket-tts-openai_streaming_server](https://github.com/teddybear082/pocket-tts-openai_streaming_server) by @teddybear082 - OpenAI-compatible streaming server, dockerized and with an `.exe` release
 - [pocket-tts-unity](https://github.com/lookbe/pocket-tts-unity) by @lookbe - A Unity 6 integration for Pocket-TTS.
 - [ComfyUI-Pocket-TTS](https://github.com/ai-joe-git/ComfyUI-Pocket-TTS) by @ai-joe-git Lightweight CPU-based Text-to-Speech for ComfyUI
@@ -208,6 +252,8 @@ We don't have official support for this yet, but you can try out one of these co
 - [openclaw-pockettts](https://github.com/dodgyrabbit/openclaw-pockettts) by @dodgyrabbit - A Docker container with the Python implementation but exposed as an OpenAI TTS API for easy integration with OpenClaw.
 - [openclaw-pocketts.cpp](https://github.com/dodgyrabbit/openclaw-pockettts.cpp) by @dodgyrabbit - A Docker container with the PocketTTS.cpp version, packaged for easy integration with OpenClaw.
 - [tts-audiobook-tool](https://github.com/zeropointnine/tts-audiobook-tool) by @zeropointnine - Multi-model audiobook generator with automatic error detection, 48khz upscaling, synced browser reader, stand-alone server-mode.
+- [seshat-tts](https://github.com/scriptriva/seshat-tts) by @scriptriva - Accessibility tool that provides real-time audio synthesis for games and apps. It also features a voice manager capable of cloning voices based on user presets.
+- [LocalVocal.ai](https://localvocal.ai) by @joshwhiton - Fully local conversational voice-harness for Macs with Apple Silicon. Includes voice-activity & turn detection, dictation, voice cloning, CLI to talk to Claude, Codex... and more.
 
 
 ## Prohibited use
