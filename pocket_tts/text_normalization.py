@@ -86,9 +86,7 @@ CURRENCY_WORDS: dict[str, tuple[str, str, str, str]] = {
 # Match a currency symbol followed by either:
 #   - integer-with-optional-thousands and optional .cents:  $3 / $1,234 / $3.02 / $1,234.56
 #   - cents-only form with no integer part:                  $.50
-_MONEY_RE = re.compile(
-    r"([$€£])(?:(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?|\.(\d{2}))"
-)
+_MONEY_RE = re.compile(r"([$€£])(?:(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?|\.(\d{2}))")
 
 
 def _money_handler(match: re.Match[str], language: str) -> str:
@@ -223,12 +221,13 @@ class UserDictionary:
                     entry.compile()
                 except re.error as exc:
                     raise ValueError(
-                        f"Invalid regex in dictionary section {section!r}: "
-                        f"{entry.match!r} ({exc})"
+                        f"Invalid regex in dictionary section {section!r}: {entry.match!r} ({exc})"
                     ) from exc
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Iterable[dict[str, Any] | DictionaryEntry]]) -> "UserDictionary":
+    def from_dict(
+        cls, raw: dict[str, Iterable[dict[str, Any] | DictionaryEntry]]
+    ) -> "UserDictionary":
         """Build a :class:`UserDictionary` from a nested mapping.
 
         ``raw`` must map language section names to iterables of either
@@ -283,8 +282,7 @@ class UserDictionary:
             raw = yaml.safe_load(text)
         else:
             raise ValueError(
-                f"Unsupported dictionary file extension: {suffix!r}.  "
-                f"Use .json, .yaml, or .yml."
+                f"Unsupported dictionary file extension: {suffix!r}.  Use .json, .yaml, or .yml."
             )
         if not isinstance(raw, dict):
             raise ValueError(
@@ -329,9 +327,7 @@ class UserDictionary:
 
 
 def normalize_text(
-    text: str,
-    language: str = "english",
-    dictionary: UserDictionary | None = None,
+    text: str, language: str = "english", dictionary: UserDictionary | None = None
 ) -> str:
     """Apply every registered normalizer (and the optional dictionary) to ``text``.
 

@@ -9,11 +9,7 @@ import io
 import numpy as np
 import torch
 
-from pocket_tts.data.audio import (
-    chunk_to_pcm_bytes,
-    downsample_audio_chunk,
-    stream_raw_pcm_chunks,
-)
+from pocket_tts.data.audio import chunk_to_pcm_bytes, downsample_audio_chunk, stream_raw_pcm_chunks
 
 
 class _PersistentBuffer(io.BytesIO):

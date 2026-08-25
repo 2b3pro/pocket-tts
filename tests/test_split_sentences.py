@@ -4,12 +4,7 @@ import pytest
 
 from pocket_tts.conditioners.text import get_default_tokenizer
 from pocket_tts.models.tts_model import split_into_best_sentences
-from pocket_tts.text_normalization import (
-    CURRENCY_WORDS,
-    DECIMAL_WORD,
-    NORMALIZERS,
-    normalize_text,
-)
+from pocket_tts.text_normalization import CURRENCY_WORDS, DECIMAL_WORD, NORMALIZERS, normalize_text
 
 
 def _normalize_decimals(text: str, language: str = "english") -> str:
@@ -315,9 +310,7 @@ class TestNormalizeText:
         assert normalize_text("Pi is 3.14") == "Pi is 3 point 14"
 
     def test_decimal_language_aware(self):
-        assert normalize_text("Es ist 37.0°C", language="german") == (
-            "Es ist 37 Komma 0°C"
-        )
+        assert normalize_text("Es ist 37.0°C", language="german") == ("Es ist 37 Komma 0°C")
 
     def test_money_and_decimal_in_same_text(self):
         text = "It cost $3.02 and the temperature was 98.6°F."

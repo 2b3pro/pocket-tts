@@ -5,11 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pocket_tts.text_normalization import (
-    DictionaryEntry,
-    UserDictionary,
-    normalize_text,
-)
+from pocket_tts.text_normalization import DictionaryEntry, UserDictionary, normalize_text
 
 
 class TestDictionaryEntry:
@@ -30,9 +26,7 @@ class TestDictionaryEntry:
         assert pattern.sub(entry.replace, "The api is good") == "The api is good"
 
     def test_literal_case_insensitive_flag(self):
-        entry = DictionaryEntry(
-            match="lol", replace="laugh out loud", case_insensitive=True
-        )
+        entry = DictionaryEntry(match="lol", replace="laugh out loud", case_insensitive=True)
         pattern = entry.compile()
         assert pattern.sub(entry.replace, "lol LOL Lol") == (
             "laugh out loud laugh out loud laugh out loud"
@@ -47,9 +41,7 @@ class TestDictionaryEntry:
         assert pattern.sub(entry.replace, "Mr. Smith and Mrx") == "Mister Smith and Mrx"
 
     def test_regex_mode(self):
-        entry = DictionaryEntry(
-            match=r"Mr\.?\s+", replace="Mister ", regex=True
-        )
+        entry = DictionaryEntry(match=r"Mr\.?\s+", replace="Mister ", regex=True)
         pattern = entry.compile()
         assert pattern.sub(entry.replace, "Mr Smith and Mr. Jones") == (
             "Mister Smith and Mister Jones"
@@ -66,35 +58,20 @@ class TestDictionaryEntry:
 
     def test_regex_case_insensitive(self):
         entry = DictionaryEntry(
-            match=r"http[s]?://\S+",
-            replace="LINK",
-            regex=True,
-            case_insensitive=True,
+            match=r"http[s]?://\S+", replace="LINK", regex=True, case_insensitive=True
         )
         pattern = entry.compile()
-        assert pattern.sub(entry.replace, "Visit HTTPS://x.com today") == (
-            "Visit LINK today"
-        )
+        assert pattern.sub(entry.replace, "Visit HTTPS://x.com today") == ("Visit LINK today")
 
 
 class TestUserDictionaryConstruction:
     def test_from_dict_basic(self):
-        d = UserDictionary.from_dict(
-            {
-                "english": [
-                    {"match": "API", "replace": "ay pee eye"},
-                ]
-            }
-        )
-        assert d.apply("The API is great.", "english") == (
-            "The ay pee eye is great."
-        )
+        d = UserDictionary.from_dict({"english": [{"match": "API", "replace": "ay pee eye"}]})
+        assert d.apply("The API is great.", "english") == ("The ay pee eye is great.")
 
     def test_from_dict_accepts_dictionary_entry_instances(self):
         d = UserDictionary.from_dict(
-            {
-                "english": [DictionaryEntry(match="API", replace="ay pee eye")],
-            }
+            {"english": [DictionaryEntry(match="API", replace="ay pee eye")]}
         )
         assert d.apply("The API.", "english") == "The ay pee eye."
 
@@ -113,9 +90,7 @@ class TestUserDictionaryConstruction:
         assert d.apply("Hello world.", "english") == "Hello world."
 
     def test_unknown_language_returns_unchanged(self):
-        d = UserDictionary.from_dict(
-            {"english": [{"match": "API", "replace": "ay pee eye"}]}
-        )
+        d = UserDictionary.from_dict({"english": [{"match": "API", "replace": "ay pee eye"}]})
         # Apply with a language that has no section -> no rewrites happen.
         assert d.apply("The API.", "klingon") == "The API."
 
@@ -128,11 +103,7 @@ class TestUserDictionaryFromFile:
                 {
                     "english": [
                         {"match": "API", "replace": "ay pee eye"},
-                        {
-                            "match": "lol",
-                            "replace": "laugh out loud",
-                            "case_insensitive": True,
-                        },
+                        {"match": "lol", "replace": "laugh out loud", "case_insensitive": True},
                     ]
                 }
             ),
@@ -205,12 +176,7 @@ class TestUserDictionaryApply:
 
     def test_multiple_entries_in_order(self):
         d = UserDictionary.from_dict(
-            {
-                "english": [
-                    {"match": "A", "replace": "B"},
-                    {"match": "B", "replace": "C"},
-                ]
-            }
+            {"english": [{"match": "A", "replace": "B"}, {"match": "B", "replace": "C"}]}
         )
         # First A->B (turning every A into B), then B->C (turning every B into C).
         assert d.apply("A B", "english") == "C C"
@@ -218,44 +184,28 @@ class TestUserDictionaryApply:
 
 class TestUserDictionaryMerge:
     def test_merge_appends_in_other(self):
-        a = UserDictionary.from_dict(
-            {"english": [{"match": "API", "replace": "ay pee eye"}]}
-        )
-        b = UserDictionary.from_dict(
-            {"english": [{"match": "lol", "replace": "laugh out loud"}]}
-        )
+        a = UserDictionary.from_dict({"english": [{"match": "API", "replace": "ay pee eye"}]})
+        b = UserDictionary.from_dict({"english": [{"match": "lol", "replace": "laugh out loud"}]})
         merged = a.merge(b)
         assert merged.apply("API lol", "english") == "ay pee eye laugh out loud"
 
     def test_merge_other_runs_after_self(self):
         """Merged dict applies self's entries first, then other's."""
-        a = UserDictionary.from_dict(
-            {"english": [{"match": "Bob", "replace": "Robert"}]}
-        )
-        b = UserDictionary.from_dict(
-            {"english": [{"match": "Robert", "replace": "Bobby"}]}
-        )
+        a = UserDictionary.from_dict({"english": [{"match": "Bob", "replace": "Robert"}]})
+        b = UserDictionary.from_dict({"english": [{"match": "Robert", "replace": "Bobby"}]})
         merged = a.merge(b)
         assert merged.apply("Hi Bob.", "english") == "Hi Bobby."
 
     def test_merge_does_not_mutate_inputs(self):
-        a = UserDictionary.from_dict(
-            {"english": [{"match": "API", "replace": "ay pee eye"}]}
-        )
-        b = UserDictionary.from_dict(
-            {"english": [{"match": "lol", "replace": "laugh out loud"}]}
-        )
+        a = UserDictionary.from_dict({"english": [{"match": "API", "replace": "ay pee eye"}]})
+        b = UserDictionary.from_dict({"english": [{"match": "lol", "replace": "laugh out loud"}]})
         a.merge(b)
         # Original 'a' must still only know about API.
         assert a.apply("API lol", "english") == "ay pee eye lol"
 
     def test_merge_adds_new_section(self):
-        a = UserDictionary.from_dict(
-            {"english": [{"match": "API", "replace": "ay pee eye"}]}
-        )
-        b = UserDictionary.from_dict(
-            {"common": [{"match": "&", "replace": " and "}]}
-        )
+        a = UserDictionary.from_dict({"english": [{"match": "API", "replace": "ay pee eye"}]})
+        b = UserDictionary.from_dict({"common": [{"match": "&", "replace": " and "}]})
         merged = a.merge(b)
         assert merged.apply("API & lol", "english") == "ay pee eye  and  lol"
 
@@ -263,14 +213,10 @@ class TestUserDictionaryMerge:
 class TestNormalizeTextWithDictionary:
     def test_dictionary_runs_after_builtin_normalizers(self):
         """Builtin money/decimal rewrites happen first, then user overrides."""
-        d = UserDictionary.from_dict(
-            {"english": [{"match": "dollars", "replace": "bucks"}]}
-        )
+        d = UserDictionary.from_dict({"english": [{"match": "dollars", "replace": "bucks"}]})
         # Money normalizer turns $3.02 -> "3 dollars and 2 cents".
         # User dictionary then rewrites 'dollars' -> 'bucks'.
-        assert normalize_text("It costs $3.02.", dictionary=d) == (
-            "It costs 3 bucks and 2 cents."
-        )
+        assert normalize_text("It costs $3.02.", dictionary=d) == ("It costs 3 bucks and 2 cents.")
 
     def test_dictionary_none_is_default(self):
         """No dictionary argument means only built-ins run."""
@@ -280,9 +226,7 @@ class TestNormalizeTextWithDictionary:
         """Per-advisor dict layered on a global dict (the Advisorium use case)."""
         global_dict = UserDictionary.from_dict(
             {
-                "english": [
-                    {"match": "API", "replace": "ay pee eye"},
-                ],
+                "english": [{"match": "API", "replace": "ay pee eye"}],
                 "common": [{"match": "&", "replace": " and "}],
             }
         )
