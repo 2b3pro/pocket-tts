@@ -4,15 +4,16 @@ import os
 import sys
 import tempfile
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 from queue import Queue
+from typing import Annotated, Any, BinaryIO, cast
 
 import typer
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
-from typing_extensions import Annotated
 
 from pocket_tts.data.audio import stream_audio_chunks, stream_raw_pcm_chunks
 from pocket_tts.default_parameters import (
@@ -24,7 +25,9 @@ from pocket_tts.default_parameters import (
     get_default_text_for_language,
     get_default_voice_for_language,
 )
-from pocket_tts.models.tts_model import TTSModel, export_model_state
+from pocket_tts.models.model_state import export_model_state
+from pocket_tts.models.tts_model import TTSModel
+from pocket_tts.modules.stateful_module import ModelState
 from pocket_tts.text_normalization import UserDictionary
 from pocket_tts.utils.logging_utils import enable_logging
 from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
@@ -93,8 +96,9 @@ cli_app = typer.Typer(
 
 # Global model instance
 tts_model: TTSModel | None = None
-# Voice served when a request doesn't specify one, resolved from the `serve` options.
-default_voice: str | None = None
+# State of the voice served when a request doesn't specify one. It is resolved once from the
+# `serve` options, so that requests never pay for the encoding of the default voice.
+default_voice_state: ModelState | None = None
 
 web_app = FastAPI(
     title="Kyutai Pocket TTS API", description="Text-to-Speech generation API", version="1.0.0"
@@ -112,34 +116,42 @@ web_app.add_middleware(
 )
 
 
+def _loaded_model() -> TTSModel:
+    if tts_model is None:
+        raise RuntimeError("no model loaded: `pocket-tts serve` loads it before serving requests")
+    return tts_model
+
+
 @web_app.get("/", response_class=HTMLResponse)
-async def root():
+async def root() -> str:
     """Serve the frontend."""
     static_path = Path(__file__).parent / "static" / "index.html"
     content = static_path.read_text()
     # Replace the placeholder with the actual default text prompt
-    print(str(tts_model.origin))
-    content = content.replace(
-        "DEFAULT_TEXT_PROMPT", get_default_text_for_language(str(tts_model.origin))
-    )
+    origin = str(_loaded_model().origin)
+    print(origin)
+    content = content.replace("DEFAULT_TEXT_PROMPT", get_default_text_for_language(origin))
     return content
 
 
 @web_app.get("/health")
-async def health():
+async def health() -> dict[str, str]:
     return {"status": "healthy"}
 
 
 def write_to_queue(
-    queue, text_to_generate, model_state, frames_after_eos=None
+    queue: Queue[bytes | None],
+    text_to_generate: str,
+    model_state: ModelState,
+    frames_after_eos: int | None = None,
 ):  # PAI-PATCH-FRAMES-AFTER-EOS v1
     """Allows writing to the StreamingResponse as if it were a file."""
 
     class FileLikeToQueue(io.IOBase):
-        def __init__(self, queue):
+        def __init__(self, queue: Queue[bytes | None]):
             self.queue = queue
 
-        def write(self, data):
+        def write(self, data: bytes):
             self.queue.put(data)
 
         def flush(self):
@@ -148,20 +160,26 @@ def write_to_queue(
         def close(self):
             self.queue.put(None)
 
-    _gen_kwargs = {
+    model = _loaded_model()
+    # Only forward frames_after_eos when the request set it, so callers (and test doubles)
+    # whose generate_audio_stream lacks the parameter keep working.
+    _gen_kwargs: dict[str, Any] = {
         "model_state": model_state,
         "text_to_generate": text_to_generate,
     }  # PAI-PATCH-FRAMES-AFTER-EOS v1
     if frames_after_eos is not None:
         _gen_kwargs["frames_after_eos"] = frames_after_eos
-    audio_chunks = tts_model.generate_audio_stream(**_gen_kwargs)
-    stream_audio_chunks(FileLikeToQueue(queue), audio_chunks, tts_model.config.mimi.sample_rate)
+    audio_chunks = model.generate_audio_stream(**_gen_kwargs)
+    # FileLikeToQueue only implements the write/close subset that StreamingWAVWriter uses.
+    stream_audio_chunks(
+        cast(BinaryIO, FileLikeToQueue(queue)), audio_chunks, model.config.mimi.sample_rate
+    )
 
 
 def generate_data_with_state(
-    text_to_generate: str, model_state: dict, frames_after_eos: int | None = None
-):  # PAI-PATCH-FRAMES-AFTER-EOS v1
-    queue = Queue()
+    text_to_generate: str, model_state: ModelState, frames_after_eos: int | None = None
+) -> Iterator[bytes]:  # PAI-PATCH-FRAMES-AFTER-EOS v1
+    queue: Queue[bytes | None] = Queue()
 
     # Run your function in a thread
     thread = threading.Thread(
@@ -181,7 +199,12 @@ def generate_data_with_state(
     thread.join()
 
 
-def write_raw_pcm_to_queue(queue, text_to_generate, model_state, target_sample_rate: int | None):
+def write_raw_pcm_to_queue(
+    queue: Queue[bytes | None],
+    text_to_generate: str,
+    model_state: ModelState,
+    target_sample_rate: int | None,
+):
     """Counterpart to ``write_to_queue`` that emits raw int16-LE PCM bytes.
 
     Bypasses the WAV envelope (no 44-byte header, no end-of-stream silence
@@ -190,10 +213,10 @@ def write_raw_pcm_to_queue(queue, text_to_generate, model_state, target_sample_r
     """
 
     class FileLikeToQueue(io.IOBase):
-        def __init__(self, queue):
+        def __init__(self, queue: Queue[bytes | None]):
             self.queue = queue
 
-        def write(self, data):
+        def write(self, data: bytes):
             self.queue.put(data)
 
         def flush(self):
@@ -202,21 +225,22 @@ def write_raw_pcm_to_queue(queue, text_to_generate, model_state, target_sample_r
         def close(self):
             self.queue.put(None)
 
-    audio_chunks = tts_model.generate_audio_stream(
+    model = _loaded_model()
+    audio_chunks = model.generate_audio_stream(
         model_state=model_state, text_to_generate=text_to_generate
     )
     stream_raw_pcm_chunks(
-        FileLikeToQueue(queue),
+        cast(BinaryIO, FileLikeToQueue(queue)),
         audio_chunks,
-        source_sample_rate=tts_model.config.mimi.sample_rate,
+        source_sample_rate=model.config.mimi.sample_rate,
         target_sample_rate=target_sample_rate,
     )
 
 
 def generate_raw_pcm_with_state(
-    text_to_generate: str, model_state: dict, target_sample_rate: int | None = None
-):
-    queue = Queue()
+    text_to_generate: str, model_state: ModelState, target_sample_rate: int | None = None
+) -> Iterator[bytes]:
+    queue: Queue[bytes | None] = Queue()
 
     thread = threading.Thread(
         target=write_raw_pcm_to_queue,
@@ -243,7 +267,7 @@ def text_to_speech(
     voice_wav: UploadFile | None = File(None),
     output_format: str = Form("wav"),
     frames_after_eos: int | None = Form(None),  # PAI-PATCH-FRAMES-AFTER-EOS v1
-):
+) -> StreamingResponse:
     """
     Generate speech from text using the pre-loaded voice prompt or a custom voice.
 
@@ -267,9 +291,6 @@ def text_to_speech(
             ),
         )
 
-    if voice_url is None and voice_wav is None:
-        voice_url = default_voice
-
     if voice_url is not None and voice_wav is not None:
         raise HTTPException(status_code=400, detail="Cannot provide both voice_url and voice_wav")
 
@@ -284,7 +305,7 @@ def text_to_speech(
             raise HTTPException(
                 status_code=400, detail="voice_url must start with http://, https://, or hf://"
             )
-        model_state = tts_model._cached_get_state_for_audio_prompt(voice_url)
+        model_state = _loaded_model()._cached_get_state_for_audio_prompt(voice_url)
         logging.warning("Using voice from URL: %s", voice_url)
     elif voice_wav is not None:
         # Use uploaded voice file - preserve extension for format detection
@@ -297,15 +318,21 @@ def text_to_speech(
 
         # Close the file before reading it back (required on Windows)
         try:
-            model_state = tts_model.get_state_for_audio_prompt(Path(temp_file_path), truncate=True)
+            model_state = _loaded_model().get_state_for_audio_prompt(
+                Path(temp_file_path), truncate=True
+            )
         finally:
             os.unlink(temp_file_path)
+    elif default_voice_state is not None:
+        model_state = default_voice_state
     else:
-        raise HTTPException(status_code=500, detail="This should never happen.")
+        raise HTTPException(status_code=500, detail="The server has no default voice loaded.")
 
     if output_format in ("pcm", "pcm_8000"):
         target_rate = 8000 if output_format == "pcm_8000" else None
-        emitted_rate = target_rate if target_rate is not None else tts_model.config.mimi.sample_rate
+        emitted_rate = (
+            target_rate if target_rate is not None else _loaded_model().config.mimi.sample_rate
+        )
         return StreamingResponse(
             generate_raw_pcm_with_state(text, model_state, target_sample_rate=target_rate),
             media_type="audio/pcm",
@@ -348,15 +375,28 @@ def serve(
             "Incompatible with the language argument. If not provided, will use the default English model."
         ),
     ] = None,
+    default_voice: Annotated[
+        str | None,
+        typer.Option(
+            help="Voice used by requests that don't ask for one: a built-in voice name, "
+            "a local path to an audio file or to a .safetensors voice, an https:// URL, "
+            "or an hf:// path. Defaults to the built-in voice of the language.",
+            show_default=False,
+        ),
+    ] = None,
     quantize: Annotated[
         bool, typer.Option(help="Apply int8 quantization to reduce memory usage")
     ] = False,
 ):
     """Start the FastAPI server."""
 
-    global tts_model, default_voice
+    global tts_model, default_voice_state
     tts_model = TTSModel.load_model(language=language, config=config, quantize=quantize)
-    default_voice = get_default_voice_for_language(language, config)
+    if default_voice is None:
+        default_voice = get_default_voice_for_language(language, config)
+    # Resolved before serving: a voice that cannot be loaded fails at startup instead of on
+    # the first request, which would otherwise pay for the encoding of the audio file.
+    default_voice_state = tts_model.get_state_for_audio_prompt(default_voice)
 
     uvicorn.run("pocket_tts.main:web_app", host=host, port=port, reload=reload)
 
@@ -368,7 +408,7 @@ def serve(
 
 @cli_app.command()
 def generate(
-    text: Annotated[str, typer.Option(help="Text to generate")] = None,
+    text: Annotated[str | None, typer.Option(help="Text to generate")] = None,
     voice: Annotated[
         str | None,
         typer.Option(
@@ -423,10 +463,12 @@ def generate(
             "value from its config (0.3 for the English model, 0.7 otherwise)."
         ),
     ] = None,
-    noise_clamp: Annotated[float, typer.Option(help="Noise clamp value")] = DEFAULT_NOISE_CLAMP,
+    noise_clamp: Annotated[
+        float | None, typer.Option(help="Noise clamp value")
+    ] = DEFAULT_NOISE_CLAMP,
     eos_threshold: Annotated[float, typer.Option(help="EOS threshold")] = DEFAULT_EOS_THRESHOLD,
     frames_after_eos: Annotated[
-        int, typer.Option(help="Number of frames to generate after EOS")
+        int | None, typer.Option(help="Number of frames to generate after EOS")
     ] = DEFAULT_FRAMES_AFTER_EOS,
     output_path: Annotated[
         str, typer.Option(help="Output path for generated audio")

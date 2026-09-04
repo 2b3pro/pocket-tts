@@ -2,7 +2,7 @@
 
 Each registered normalizer rewrites a specific surface pattern (decimals,
 currency, ...) into a spoken form *before* tokenisation, preventing the
-sentence splitter in :mod:`pocket_tts.models.tts_model` from breaking on
+sentence splitter in :mod:`pocket_tts.models.text_chunking` from breaking on
 punctuation that is structural rather than prosodic.
 
 The registry is ordered: normalizers run sequentially via
