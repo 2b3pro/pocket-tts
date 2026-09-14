@@ -60,8 +60,10 @@ class DataLoader:
         seed: int = 0,
         shuffle: bool = True,
         io_workers: int = 16,
+        num_bucket_batches: int = 1,
     ):
         self.jsonl = jsonl
+        self.num_bucket_batches = num_bucket_batches
         self.entries = load_entries(jsonl, rank, world_size)
         self.tokenize = tokenize
         self.batch_size = batch_size
@@ -314,31 +316,50 @@ class DataLoader:
                 chunk_entries = [self.get_entry(i) for i in chunk]
                 got = [s for s in pool.map(self._sample_or_none, chunk_entries) if s is not None]
                 samples.extend(got)
-                if len(samples) < self.batch_size:
+                # Sort a pool of batches by row length so rows in a batch have similar lengths.
+                pool_size = max(1, self.num_bucket_batches) * self.batch_size
+                if len(samples) < pool_size:
                     continue
-                batch, samples = samples[: self.batch_size], samples[self.batch_size :]
-                yielded += 1
-                if self.stitch_frames:
-                    yield self._collate_latent(batch)
-                    continue
-                wavs, tokens, prompts, prompt_lens = zip(*batch, strict=True)
-                max_len = max(len(w) for w in wavs)
-                audio = torch.zeros(len(wavs), 1, max_len)
-                frames = torch.zeros(len(wavs), dtype=torch.long)
-                for b, w in enumerate(wavs):
-                    audio[b, 0, : len(w)] = torch.from_numpy(w)
-                    frames[b] = max(1, int(len(w) * self.frame_rate / self.sample_rate))
-                max_prompt = max(len(p) for p in prompts)
-                voice = torch.zeros(len(prompts), 1, max_prompt)
-                for b, pr in enumerate(prompts):
-                    voice[b, 0, : len(pr)] = torch.from_numpy(pr)
-                num_voice_prompt_frames = torch.tensor(
-                    [max(1, int(n * self.frame_rate / self.sample_rate)) for n in prompt_lens],
-                    dtype=torch.long,
-                )
-                yield Batch(audio, frames, list(tokens), voice, num_voice_prompt_frames)
+                samples.sort(key=self._row_len)
+                n = len(samples) // self.batch_size
+                batches = [
+                    samples[i * self.batch_size : (i + 1) * self.batch_size] for i in range(n)
+                ]
+                samples = samples[n * self.batch_size :]
+                if self.shuffle:
+                    self.rng.shuffle(batches)
+                for batch in batches:
+                    yielded += 1
+                    yield self._collate(batch)
             if not yielded:
                 raise ValueError(
                     f"no readable samples in {self.jsonl}: every entry failed to load "
                     f"({self._failures} failures). Check the paths in the manifest."
                 )
+
+    def _row_len(self, sample: tuple[Any, ...]) -> float:
+        """Voice prompt + text tokens + target audio frames: what a row costs after padding."""
+        if self.stitch_frames:  # (stitch wav, tokens, prompt latents, tail latents, target frames)
+            return sample[2].shape[0] + len(sample[1]) + int(sample[4])
+        wav, tokens, _prompt, prompt_samples = sample
+        return (prompt_samples + len(wav)) * self.frame_rate / self.sample_rate + len(tokens)
+
+    def _collate(self, batch: list[tuple[Any, ...]]) -> Batch:
+        if self.stitch_frames:
+            return self._collate_latent(batch)
+        wavs, tokens, prompts, prompt_lens = zip(*batch, strict=True)
+        max_len = max(len(w) for w in wavs)
+        audio = torch.zeros(len(wavs), 1, max_len)
+        frames = torch.zeros(len(wavs), dtype=torch.long)
+        for b, w in enumerate(wavs):
+            audio[b, 0, : len(w)] = torch.from_numpy(w)
+            frames[b] = max(1, int(len(w) * self.frame_rate / self.sample_rate))
+        max_prompt = max(len(p) for p in prompts)
+        voice = torch.zeros(len(prompts), 1, max_prompt)
+        for b, pr in enumerate(prompts):
+            voice[b, 0, : len(pr)] = torch.from_numpy(pr)
+        num_voice_prompt_frames = torch.tensor(
+            [max(1, int(n * self.frame_rate / self.sample_rate)) for n in prompt_lens],
+            dtype=torch.long,
+        )
+        return Batch(audio, frames, list(tokens), voice, num_voice_prompt_frames)
