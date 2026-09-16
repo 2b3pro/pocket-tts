@@ -352,6 +352,16 @@ uvx pocket-tts generate \
 ```
 </details>
 
+<details>
+<summary><a href="https://huggingface.co/EryriLabs/pocket-tts-cymraeg">Pocket TTS Cymraeg (Welsh)</a> by <a href="https://huggingface.co/EryriLabs">EryriLabs</a> (community research release), 24 layers</summary>
+
+```bash
+uvx pocket-tts generate \
+  --config hf://EryriLabs/pocket-tts-cymraeg/config.yaml@1f23b3a8d1706b24a2faf3c77075a223ed69f57c \
+  --text "Mae'r tywydd yn braf yng Nghymru heddiw."
+```
+</details>
+
 Want your model here? Head to the [training Readme](https://github.com/kyutai-labs/pocket-tts/blob/main/training/README.md) to get started!
 
 ## Projects using Pocket TTS
