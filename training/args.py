@@ -23,6 +23,13 @@ class DataArgs:
     # so prompts vary in length and the target keeps most of the utterance.
     # <= 0 removes the window (any word boundary; full-prefix prompt).
     max_voice_prompt_sec: float = 5.0
+    # Robustness augmentations, on by default at the values the released models used.
+    # prompt_trim_max_sec trims a uniform 0..N seconds off the end of every voice prompt
+    # (prompts cut mid-word at inference stay in distribution); final_punct_dropout drops
+    # the target text's final period with this probability (unpunctuated prompts stay in
+    # distribution). Set to 0 to disable.
+    prompt_trim_max_sec: float = 0.5
+    final_punct_dropout: float = 0.3
     shuffle: bool = True
     # Loader subprocesses per rank. Each one is GIL-bound at ~90 samples/s from
     # network storage (extra IO threads do not help), and a rank consumes
@@ -77,6 +84,9 @@ class TrainArgs:
     # If false, only Mimi/tokenizer weights are used and the FlowLM is
     # re-initialized (training from scratch).
     start_from_pretrained: bool = True
+    # Freeze the sampler head (flow_net) during a fine-tune so the latent geometry a
+    # distilled student was trained against is preserved.
+    freeze_head: bool = False
     # Load the pretrained weights but start the text embedding from scratch.
     # Needed when the tokenizer differs from the one the weights were trained
     # with, e.g. when training for a new language.
@@ -141,6 +151,10 @@ class TrainArgs:
     # Use the teacher checkpoint's EMA shadow as the regression target (falls
     # back to raw weights when the checkpoint carries no EMA).
     distill_teacher_use_ema: bool = True
+    # Warm-start the student's backbone and conditioning from these weights (a training
+    # checkpoint, or a released model.safetensors, local or hf://) instead of the
+    # teacher's bottom+top layers; the per-frame heads still come from the teacher.
+    student_init_from: str = ""
     # Which teacher layers seed the student backbone: "spaced" (evenly across
     # the depth) or "first" (the bottom N). No evidence either way -- "first"
     # keeps the early feature extractors contiguous.
