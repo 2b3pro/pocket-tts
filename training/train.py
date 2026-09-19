@@ -43,6 +43,7 @@ from training.train_utils import (
     ProgressLog,
     _compile_models,
     add_file_logging,
+    build_optimizer,
     ensure_train_latents,
     git_commit,
     lr_at,
@@ -123,14 +124,7 @@ def setup(config_path: str) -> Run:
     if rank == 0:
         logger.info(f"flow_lm + objective: {n_params / 1e6:.1f}M trainable params")
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=args.optim.lr,
-        betas=args.optim.betas,
-        eps=args.optim.eps,
-        weight_decay=args.optim.weight_decay,
-        fused=device.type == "cuda",
-    )
+    optimizer = build_optimizer(model, args, device, rank)
     ema = EMA(model, args.ema_decay) if args.ema_decay > 0 else None
 
     start_step = 0
@@ -222,7 +216,7 @@ def main(config_path: str):
         step_start = time.time()
         lr = lr_at(step, args)
         for group in optimizer.param_groups:
-            group["lr"] = lr
+            group["lr"] = lr * group.get("lr_scale", 1.0)
         optimizer.zero_grad()
         for micro in range(args.grad_accum_steps):
             batch = next(train_loader)

@@ -63,6 +63,20 @@ class OptimArgs:
     # a cosine fine-tune.
     schedule: str = "constant"
     lr_min_ratio: float = 0.0
+    # "adamw", or "muon": Newton-Schulz orthogonalized momentum on the backbone's 2D
+    # weights (the fused q/k/v projection orthogonalized as three blocks), AdamW on
+    # everything else. muon_lr is the Muon step size; the AdamW groups keep `lr`, and
+    # the schedule applies to both. muon_head also puts the sampler head's 2D weights
+    # under Muon (useful for head-only fine-tunes).
+    type: str = "adamw"
+    muon_lr: float = 0.005
+    muon_momentum: float = 0.95
+    muon_head: bool = False
+    # Scale the orthogonal update by 0.2 * sqrt(max(rows, cols)) so its RMS matches AdamW's
+    # (Liu et al. 2025) instead of sqrt(max(1, rows / cols)); with it, muon_lr should equal lr.
+    muon_rms_match: bool = False
+    # Polar Express iterations; 6 reaches singular values within 1%, fewer is cheaper but looser.
+    muon_polar_steps: int = 6
 
 
 @dataclass
