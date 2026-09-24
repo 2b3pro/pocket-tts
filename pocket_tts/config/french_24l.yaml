@@ -2,6 +2,21 @@ weights_path: hf://kyutai/pocket-tts/languages/french_24l/model.safetensors@d0eb
 weights_path_without_voice_cloning: hf://kyutai/pocket-tts-without-voice-cloning/languages/french_24l/model.safetensors@8843db76457a91db32077edf8dfcd1c0e3e755fd
 
 remove_semicolons: true
+# Replace characters that are absent from the training data.
+replace_characters:
+  '"': ''
+  '“': ''
+  '”': ''
+  '„': ''
+  '«': ''
+  '»': ''
+  '’': "'"
+  '‘': "'"
+  ':': ','
+  '(': ''
+  ')': ''
+  '[': ''
+  ']': ''
 
 flow_lm:
   insert_bos_before_voice: true

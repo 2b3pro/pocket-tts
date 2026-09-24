@@ -5,6 +5,7 @@ boundaries and regrouped into chunks that fit `max_tokens`.
 """
 
 import logging
+import re
 
 from pocket_tts.modules.text_conditioner import Tokenizer
 
@@ -17,8 +18,14 @@ def prepare_text_prompt(
     remove_semicolons: bool,
     append_terminal_punctuation: bool = True,
     capitalize_first_letter: bool = True,
+    replace_characters: dict[str, str] | None = None,
 ) -> tuple[str, int]:
     text = text.strip()
+    if replace_characters:
+        text = " ".join(text.translate(str.maketrans(replace_characters)).split())
+        # Deleted quotes leave '"Hi?", she said' as 'Hi?, she said', which reads as a sentence end
+        # followed by a stray comma; keep the sentence mark only.
+        text = re.sub(r"([.!?\u2026])\s*[,;:]", r"\1", text)
     if text == "":
         raise ValueError("Text prompt cannot be empty")
     text = text.replace("\n", " ").replace("\r", " ").replace("  ", " ")
@@ -141,6 +148,7 @@ def split_into_best_sentences(
     remove_semicolons: bool,
     append_terminal_punctuation: bool = True,
     capitalize_first_letter: bool = True,
+    replace_characters: dict[str, str] | None = None,
 ) -> list[str]:
     text_to_generate, _ = prepare_text_prompt(
         text_to_generate,
@@ -148,6 +156,7 @@ def split_into_best_sentences(
         remove_semicolons,
         append_terminal_punctuation,
         capitalize_first_letter,
+        replace_characters,
     )
     text_to_generate = text_to_generate.strip()
     tokens = tokenizer(text_to_generate)
